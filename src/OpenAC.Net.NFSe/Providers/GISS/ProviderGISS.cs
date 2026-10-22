@@ -1,7 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography.X509Certificates;
+using System.Security.Cryptography.Xml;
 using System.Text;
+using System.Xml;
 using System.Xml.Linq;
 using OpenAC.Net.Core.Extensions;
 using OpenAC.Net.DFe.Core;
@@ -319,8 +322,44 @@ internal class ProviderGISS : ProviderABRASF204
         
     protected override void AssinarEnviar(RetornoEnviar retornoWebservice)
     {
-        retornoWebservice.XmlEnvio = XmlSigning.AssinarXml(retornoWebservice.XmlEnvio, "ns2:Rps", "ns2:InfDeclaracaoPrestacaoServico", Certificado);
+        retornoWebservice.XmlEnvio = AssinarRpsLote(retornoWebservice.XmlEnvio);
         retornoWebservice.XmlEnvio = XmlSigning.AssinarXml(retornoWebservice.XmlEnvio, "ns4:EnviarLoteRpsEnvio", "ns4:LoteRps", Certificado);
+    }
+
+    /// <summary>
+    /// Assina cada RPS do lote no contexto do documento (C14N com os namespaces herdados), igual ao AssinarXml faz com um RPS só.
+    /// O AssinarXml não aceita mais de um InfDeclaracaoPrestacaoServico no documento e o AssinarXmlTodos assina cada RPS
+    /// isolado, gerando um digest que o GISS rejeita (E172 - Arquivo enviado com erro na assinatura).
+    /// </summary>
+    private string AssinarRpsLote(string xml)
+    {
+        var doc = new XmlDocument { PreserveWhitespace = true };
+        doc.LoadXml(xml);
+
+        // Apenas os Rps filhos de ListaRps; o InfDeclaracaoPrestacaoServico também possui um Rps interno
+        var listaRps = doc.GetElementsByTagName("ns2:ListaRps").Cast<XmlElement>().Single();
+        foreach (var rps in listaRps.ChildNodes.OfType<XmlElement>().Where(x => x.Name == "ns2:Rps").ToList())
+        {
+            var infDeclaracao = rps.ChildNodes.OfType<XmlElement>().Single(x => x.Name == "ns2:InfDeclaracaoPrestacaoServico");
+
+            var signedXml = new SignedXml(doc) { SigningKey = Certificado.GetRSAPrivateKey() };
+            signedXml.SignedInfo.CanonicalizationMethod = SignedXml.XmlDsigC14NTransformUrl;
+            signedXml.SignedInfo.SignatureMethod = SignedXml.XmlDsigRSASHA1Url;
+
+            var reference = new Reference($"#{infDeclaracao.GetAttribute("Id")}") { DigestMethod = SignedXml.XmlDsigSHA1Url };
+            reference.AddTransform(new XmlDsigEnvelopedSignatureTransform());
+            reference.AddTransform(new XmlDsigC14NTransform());
+            signedXml.AddReference(reference);
+
+            var keyInfo = new KeyInfo();
+            keyInfo.AddClause(new KeyInfoX509Data(Certificado));
+            signedXml.KeyInfo = keyInfo;
+
+            signedXml.ComputeSignature();
+            rps.AppendChild(doc.ImportNode(signedXml.GetXml(), true));
+        }
+
+        return doc.OuterXml;
     }
         
     protected override void PrepararConsultarLoteRps(RetornoConsultarLoteRps retornoWebservice)
