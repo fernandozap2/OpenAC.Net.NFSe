@@ -40,6 +40,9 @@ using OpenAC.Net.NFSe.Commom.Types;
 
 namespace OpenAC.Net.NFSe.Providers;
 
+/// <summary>
+/// Cliente de comunicação e envio de mensagens para o webservice do provedor DSF.
+/// </summary>
 internal sealed class DSF203ServiceClient : NFSeSoapServiceClient, IServiceClient
 {
     #region Constructors
@@ -139,12 +142,13 @@ internal sealed class DSF203ServiceClient : NFSeSoapServiceClient, IServiceClien
         var element = xmlDocument.ElementAnyNs("Fault");
         if (element != null)
         {
-            var exMessage =
-                $"{element.ElementAnyNs("faultcode").GetValue<string>()} - {element.ElementAnyNs("faultstring").GetValue<string>()}";
+            var exMessage = $"{element.ElementAnyNs("faultcode").GetValue<string>()} - {element.ElementAnyNs("faultstring").GetValue<string>()}";
             throw new OpenDFeCommunicationException(exMessage);
         }
 
-        return xmlDocument.ElementAnyNs(responseTag[0]).ToString();
+        var reader = xmlDocument.ElementAnyNs(responseTag[0]).CreateReader();
+        reader.MoveToContent();
+        return reader.ReadInnerXml();
     }
 
     private string Execute(string message, string responseTag) =>

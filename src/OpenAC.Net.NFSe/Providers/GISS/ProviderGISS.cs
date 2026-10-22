@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
@@ -17,6 +17,9 @@ using OpenAC.Net.NFSe.Nota;
 
 namespace OpenAC.Net.NFSe.Providers;
 
+/// <summary>
+/// Provedor de NFSe para o sistema/padrão GISS.
+/// </summary>
 internal class ProviderGISS : ProviderABRASF204
 {
     #region Constructors
@@ -92,11 +95,17 @@ internal class ProviderGISS : ProviderABRASF204
         if (tribTot != null)
             trib.AddChild(tribTot);
 
+        if (tribTot == null && tribFed == null)
+            trib = null;
+
         return trib;
     }
 
     protected XElement? WriteTribFedRps(NotaServico nota)
     {
+        if (string.IsNullOrWhiteSpace(nota.Servico.Valores.TipoRetencaoPisCofins))
+            return null;
+
         var valores = nota.Servico.Valores;
 
         if (string.IsNullOrWhiteSpace(valores.TipoRetencaoPisCofins))
@@ -322,44 +331,74 @@ internal class ProviderGISS : ProviderABRASF204
         
     protected override void AssinarEnviar(RetornoEnviar retornoWebservice)
     {
-        retornoWebservice.XmlEnvio = AssinarRpsLote(retornoWebservice.XmlEnvio);
+        // A GISS exige CADA RPS assinada individualmente (confirmado empiricamente — sem
+        // isso o servidor responde "E174 - RPS não assinado"). XmlSigning.AssinarXmlTodos() tentava
+        // fazer isso isolando cada <Rps> num XmlDocument à parte antes de assinar e reencaixando o
+        // fragmento já assinado — mas a C14N não-exclusiva usada aqui (REC-xml-c14n-20010315) inclui
+        // TODOS os namespaces em escopo do documento no hash. Isolado, só "ns2" está em escopo; no
+        // documento final montado (com "ds"/"ns4"/"ns2"/"xsi" na raiz), o escopo é outro — o hash
+        // calculado no isolamento não bate com o que a GISS recalcula ao validar ("E172 - Arquivo
+        // enviado com erro na assinatura"). AssinarRpsIndividualmenteNoDocumento() abaixo assina cada
+        // RPS DIRETO no documento final (sem isolar), garantindo que o contexto de namespace na hora
+        // de assinar já seja idêntico ao da validação.
+        retornoWebservice.XmlEnvio = AssinarRpsIndividualmenteNoDocumento(retornoWebservice.XmlEnvio, Certificado);
         retornoWebservice.XmlEnvio = XmlSigning.AssinarXml(retornoWebservice.XmlEnvio, "ns4:EnviarLoteRpsEnvio", "ns4:LoteRps", Certificado);
     }
 
-    /// <summary>
-    /// Assina cada RPS do lote no contexto do documento (C14N com os namespaces herdados), igual ao AssinarXml faz com um RPS só.
-    /// O AssinarXml não aceita mais de um InfDeclaracaoPrestacaoServico no documento e o AssinarXmlTodos assina cada RPS
-    /// isolado, gerando um digest que o GISS rejeita (E172 - Arquivo enviado com erro na assinatura).
-    /// </summary>
-    private string AssinarRpsLote(string xml)
+    // Assina cada <ns2:Rps>/<ns2:InfDeclaracaoPrestacaoServico Id="..."> diretamente dentro do MESMO
+    // XmlDocument final (sem isolar em documentos separados como AssinarXmlTodos), replicando a lógica
+    // de XmlSigning.GerarAssinatura (OpenAC.Net.DFe.Core) mas sem a restrição de "exatamente um elemento
+    // no documento inteiro" — aqui cada RPS já tem seu Id único, então assinamos um de cada vez sem
+    // ambiguidade, com o contexto de namespaces sempre igual ao do documento que será realmente enviado.
+    private static string AssinarRpsIndividualmenteNoDocumento(string xmlEnvio, X509Certificate2 certificado)
     {
         var doc = new XmlDocument { PreserveWhitespace = true };
-        doc.LoadXml(xml);
+        doc.LoadXml(xmlEnvio);
 
-        // Apenas os Rps filhos de ListaRps; o InfDeclaracaoPrestacaoServico também possui um Rps interno
-        var listaRps = doc.GetElementsByTagName("ns2:ListaRps").Cast<XmlElement>().Single();
-        foreach (var rps in listaRps.ChildNodes.OfType<XmlElement>().Where(x => x.Name == "ns2:Rps").ToList())
+        foreach (XmlElement rps in doc.GetElementsByTagName("ns2:Rps"))
         {
-            var infDeclaracao = rps.ChildNodes.OfType<XmlElement>().Single(x => x.Name == "ns2:InfDeclaracaoPrestacaoServico");
+            var infoElements = rps.GetElementsByTagName("ns2:InfDeclaracaoPrestacaoServico");
+            if (infoElements.Count != 1) continue;
 
-            var signedXml = new SignedXml(doc) { SigningKey = Certificado.GetRSAPrivateKey() };
-            signedXml.SignedInfo.CanonicalizationMethod = SignedXml.XmlDsigC14NTransformUrl;
-            signedXml.SignedInfo.SignatureMethod = SignedXml.XmlDsigRSASHA1Url;
+            var infoElement = (XmlElement)infoElements[0];
+            var id = infoElement.Attributes["Id"]?.InnerText;
+            if (string.IsNullOrEmpty(id)) continue;
 
-            var reference = new Reference($"#{infDeclaracao.GetAttribute("Id")}") { DigestMethod = SignedXml.XmlDsigSHA1Url };
-            reference.AddTransform(new XmlDsigEnvelopedSignatureTransform());
-            reference.AddTransform(new XmlDsigC14NTransform());
-            signedXml.AddReference(reference);
-
-            var keyInfo = new KeyInfo();
-            keyInfo.AddClause(new KeyInfoX509Data(Certificado));
-            signedXml.KeyInfo = keyInfo;
-
-            signedXml.ComputeSignature();
-            rps.AppendChild(doc.ImportNode(signedXml.GetXml(), true));
+            var signatureNode = GerarAssinaturaPorId(doc, id, certificado);
+            rps.AppendChild(doc.ImportNode(signatureNode, true));
         }
 
-        return doc.OuterXml;
+        return doc.AsString(false, true);
+    }
+
+    // Réplica de XmlSigning.GerarAssinatura (privado em OpenAC.Net.DFe.Core), assinando um elemento
+    // identificado por Id específico em vez de exigir contagem == 1 no documento inteiro.
+    private static XmlElement GerarAssinaturaPorId(XmlDocument doc, string idValue, X509Certificate2 certificado)
+    {
+        var keyInfo = new KeyInfo();
+        keyInfo.AddClause(new KeyInfoX509Data(certificado));
+
+        var signedDocument = new SignedXml(doc)
+        {
+            SigningKey = certificado.GetRSAPrivateKey(),
+            KeyInfo = keyInfo
+        };
+
+        signedDocument.SignedInfo.CanonicalizationMethod = SignedXml.XmlDsigC14NTransformUrl;
+        signedDocument.SignedInfo.SignatureMethod = SignedXml.XmlDsigRSASHA1Url;
+
+        var reference = new Reference
+        {
+            Uri = $"#{idValue}",
+            DigestMethod = SignedXml.XmlDsigSHA1Url
+        };
+        reference.AddTransform(new XmlDsigEnvelopedSignatureTransform());
+        reference.AddTransform(new XmlDsigC14NTransform());
+
+        signedDocument.AddReference(reference);
+        signedDocument.ComputeSignature();
+
+        return signedDocument.GetXml();
     }
         
     protected override void PrepararConsultarLoteRps(RetornoConsultarLoteRps retornoWebservice)

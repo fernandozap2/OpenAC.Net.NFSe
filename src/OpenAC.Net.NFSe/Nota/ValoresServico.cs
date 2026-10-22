@@ -32,7 +32,10 @@
 using System.ComponentModel;
 using OpenAC.Net.Core.Generics;
 
-namespace OpenAC.Net.NFSe.Nota;
+namespace OpenAC.Net.NFSe.Nota;/// <summary>
+/// Valores monetários, alíquotas, deduções, descontos e tributos da prestação de serviços.
+/// </summary>
+
 
 public sealed class ValoresServico : GenericClone<ValoresServico>, INotifyPropertyChanged
 {
@@ -54,6 +57,14 @@ public sealed class ValoresServico : GenericClone<ValoresServico>, INotifyProper
     #region Propriedades
 
     public decimal ValorServicos { get; set; }
+
+    public decimal? ValorInicialCobrado { get; set; }
+
+    public decimal? ValorFinalCobrado { get; set; }
+
+    public decimal? ValorIpi { get; set; }
+
+    public bool? ExigibilidadeSuspensa { get; set; }
 
     public decimal ValorDeducoes { get; set; }
 
@@ -80,6 +91,8 @@ public sealed class ValoresServico : GenericClone<ValoresServico>, INotifyProper
     public decimal? AliquotaTotalFederal { get; set; }
     
     public decimal? AliquotaTotalMunicipal { get; set; }
+
+    public decimal? AliquotaTotalSimplesNacional { get; set; }
 
     public decimal BaseCalculo { get; set; }
 
